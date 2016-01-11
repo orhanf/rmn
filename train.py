@@ -1,21 +1,27 @@
 '''
-Build a simple neural language model using GRU units
+Build a neural language model using GRU-RMN units
 '''
 import theano
 import theano.tensor as tensor
 
 import cPickle as pkl
+import importlib
 import ipdb
+import logging
 import numpy
 import copy
 
 import os
 import time
 
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+
 from data_iterator import TextIterator, prepare_data
 from rmn import RMN
 from utils import (zipp, unzip, itemlist)
 
+
+logger = logging.getLogger(__name__)
 profile = False
 
 
@@ -29,6 +35,9 @@ def train(dim_word=100,  # word vector dimensionality
           decay_c=0.,  # L2 weight decay penalty
           lrate=0.01,
           n_words=100000,  # vocabulary size
+          vocab_dim=100000,  # Size of M, C
+          memory_dim=1000,  # Dimension of memory
+          memory_size=15,  # n_back to attend
           maxlen=100,  # maximum length of the description
           optimizer='rmsprop',
           batch_size=16,
@@ -46,6 +55,9 @@ def train(dim_word=100,  # word vector dimensionality
 
     # Model options
     model_options = locals().copy()
+
+    # Theano random stream
+    trng = RandomStreams(1234)
 
     # load dictionary
     with open(dictionary, 'rb') as f:
@@ -77,25 +89,21 @@ def train(dim_word=100,  # word vector dimensionality
     rmn_ = RMN(model_options)
 
     print 'Building model'
-    params = rmn_.init_params()
+    rmn_.init_params()
 
     # reload parameters
     if reload_ and os.path.exists(saveto):
-        params = rmn_.load_params(saveto, params)
+        rmn_.load_params(saveto)
 
     # create shared variables for parameters
-    tparams = rmn_.init_tparams(params)
+    tparams = rmn_.tparams
 
     # build the symbolic computational graph
-    trng, use_noise, \
-        x, x_mask, \
-        opt_ret, \
-        cost = \
-        rmn_.build_model(tparams, model_options)
+    use_noise, x, x_mask, opt_ret, cost = rmn_.build_model()
     inps = [x, x_mask]
 
     print 'Buliding sampler'
-    f_next = rmn_.build_sampler(tparams, model_options, trng)
+    f_next = rmn_.build_sampler(trng)
 
     # before any regularizer
     print 'Building f_log_probs...',
@@ -125,7 +133,8 @@ def train(dim_word=100,  # word vector dimensionality
     # compile the optimizer, the actual computational graph is compiled here
     lr = tensor.scalar(name='lr')
     print 'Building optimizers...',
-    f_grad_shared, f_update = eval(optimizer)(lr, tparams, grads, inps, cost)
+    optimizer = importlib.import_module('optimizer.' + optimizer)
+    f_grad_shared, f_update = optimizer(lr, tparams, grads, inps, cost)
     print 'Done'
 
     print 'Optimization'

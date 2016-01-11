@@ -5,6 +5,7 @@ import theano
 import warnings
 
 from collections import OrderedDict
+from theano.ifelse import ifelse
 from theano import tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
@@ -64,6 +65,10 @@ def param_init_gru_rmn(params, prefix='gru_rmn', nin=None, dim=None,
                        vocab_dim=None, memory_dim=None, memory_size=None):
 
     # first GRU params
+    W = numpy.concatenate([norm_weight(nin, dim),
+                           norm_weight(nin, dim)], axis=1)
+    params[_p(prefix, 'W')] = W
+    params[_p(prefix, 'b')] = numpy.zeros((2 * dim,)).astype('float32')
     U = numpy.concatenate([ortho_weight(dim), ortho_weight(dim)], axis=1)
     params[_p(prefix, 'U')] = U
     params[_p(prefix, 'Wx')] = norm_weight(nin, dim)
@@ -87,7 +92,7 @@ def param_init_gru_rmn(params, prefix='gru_rmn', nin=None, dim=None,
 
 
 def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
-                  memory_size=15, **kwargs):
+                  memory_size=15, x=None, **kwargs):
     nsteps = state_below.shape[0]
     if state_below.ndim == 3:
         n_samples = state_below.shape[1]
@@ -133,11 +138,13 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
         h1 = m_[:, None] * h1 + (1. - m_)[:, None] * h1_
 
         # memory block
-        n_back = tensor.max(idx - memory_size, 0)
-        xi = ctx[n_back:idx, :]
+        n_back = idx - memory_size
+        n_back = ifelse(tensor.lt(n_back, 0),
+                        tensor.zeros_like(n_back), n_back)
+        xi = ctx[n_back:idx, :].flatten()
         Mi = M[xi, :]
         Ci = C[xi, :]
-        Ti = T[-n_back:, :]
+        Ti = T[-n_back:, :]  # so called slicing
 
         preact = tensor.dot((Mi + Ti), h1)
         pt = tensor.nnet.softmax(preact)
@@ -162,7 +169,8 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
                           sequences=seqs,
                           outputs_info=[tensor.alloc(0., n_samples, dim),
                                         tensor.alloc(0., n_samples, dim)],
-                          non_sequences=[tparams[_p(prefix, 'U')],
+                          non_sequences=[x,  # will be attended
+                                         tparams[_p(prefix, 'U')],
                                          tparams[_p(prefix, 'Ux')],
                                          tparams[_p(prefix, 'M')],
                                          tparams[_p(prefix, 'C')],
@@ -196,18 +204,20 @@ class RMN(object):
         params['Wemb'] = norm_weight(options['n_words'], options['dim_word'])
 
         # rmn layer
-        params = get_layer(options['encoder'])[0](options, params,
-                                                  prefix='encoder',
-                                                  nin=options['dim_word'],
-                                                  dim=options['dim'])
+        params = get_layer(options['encoder'])[0](
+            params, prefix='encoder', nin=options['dim_word'],
+            dim=options['dim'], vocab_dim=options['vocab_dim'],
+            memory_dim=options['memory_dim'],
+            memory_size=options['memory_size'])
+
         # readout
-        params = get_layer('ff')[0](options, params, prefix='ff_logit_lstm',
+        params = get_layer('ff')[0](params, prefix='ff_logit_lstm',
                                     nin=options['dim'],
                                     nout=options['dim_word'], ortho=False)
-        params = get_layer('ff')[0](options, params, prefix='ff_logit_prev',
+        params = get_layer('ff')[0](params, prefix='ff_logit_prev',
                                     nin=options['dim_word'],
                                     nout=options['dim_word'], ortho=False)
-        params = get_layer('ff')[0](options, params, prefix='ff_logit',
+        params = get_layer('ff')[0](params, prefix='ff_logit',
                                     nin=options['dim_word'],
                                     nout=options['n_words'])
         self.params = params
@@ -257,19 +267,20 @@ class RMN(object):
         opt_ret['emb'] = emb
 
         # pass through gru layer, recurrence here
-        proj = get_layer(options['encoder'])[1](tparams, emb, options,
-                                                prefix='encoder',
-                                                mask=x_mask)
-        proj_h = proj[0]
+        proj = get_layer(options['encoder'])[1](
+            tparams, emb, prefix='encoder', x=x, mask=x_mask,
+            memory_size=options['memory_size'])
+
+        proj_h = proj[1]
         opt_ret['proj_h'] = proj_h
 
         # compute word probabilities
-        logit_lstm = get_layer('ff')[1](tparams, proj_h, options,
+        logit_lstm = get_layer('ff')[1](tparams, proj_h,
                                         prefix='ff_logit_lstm', activ='linear')
-        logit_prev = get_layer('ff')[1](tparams, emb, options,
+        logit_prev = get_layer('ff')[1](tparams, emb,
                                         prefix='ff_logit_prev', activ='linear')
         logit = tensor.tanh(logit_lstm+logit_prev)
-        logit = get_layer('ff')[1](tparams, logit, options, prefix='ff_logit',
+        logit = get_layer('ff')[1](tparams, logit, prefix='ff_logit',
                                    activ='linear')
         logit_shp = logit.shape
         probs = tensor.nnet.softmax(
@@ -306,7 +317,7 @@ class RMN(object):
                             tparams['Wemb'][y])
 
         # apply one step of gru layer
-        proj = get_layer(options['encoder'])[1](tparams, emb, options,
+        proj = get_layer(options['encoder'])[1](tparams, emb,
                                                 prefix='encoder',
                                                 mask=None,
                                                 one_step=True,
