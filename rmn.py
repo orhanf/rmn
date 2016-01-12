@@ -92,8 +92,13 @@ def param_init_gru_rmn(params, prefix='gru_rmn', nin=None, dim=None,
 
 
 def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
-                  memory_size=15, x=None, **kwargs):
+                  memory_size=15, x=None, one_step=False, init_states=None,
+                  step=None, **kwargs):
+    if one_step:
+        assert init_states, 'previous states must be provided'
+
     nsteps = state_below.shape[0]
+
     if state_below.ndim == 3:
         n_samples = state_below.shape[1]
     else:
@@ -102,6 +107,8 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
     dim = tparams[_p(prefix, 'Ux')].shape[1]
 
     steps = tensor.arange(state_below.shape[0])
+    if one_step and step is not None:
+        steps = step
 
     if mask is None:
         mask = tensor.alloc(1., state_below.shape[0], 1)
@@ -164,26 +171,34 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
 
     seqs = [steps, mask, state_below_, state_belowx]
     _step = _step_slice
+    shared_vars = [x,  # will be attended
+                   tparams[_p(prefix, 'U')],
+                   tparams[_p(prefix, 'Ux')],
+                   tparams[_p(prefix, 'M')],
+                   tparams[_p(prefix, 'C')],
+                   tparams[_p(prefix, 'T')],
+                   tparams[_p(prefix, 'Wz')],
+                   tparams[_p(prefix, 'Uz')],
+                   tparams[_p(prefix, 'Wr')],
+                   tparams[_p(prefix, 'Ur')],
+                   tparams[_p(prefix, 'W2')],
+                   tparams[_p(prefix, 'U2')]]
 
-    rval, _ = theano.scan(_step,
-                          sequences=seqs,
-                          outputs_info=[tensor.alloc(0., n_samples, dim),
-                                        tensor.alloc(0., n_samples, dim)],
-                          non_sequences=[x,  # will be attended
-                                         tparams[_p(prefix, 'U')],
-                                         tparams[_p(prefix, 'Ux')],
-                                         tparams[_p(prefix, 'M')],
-                                         tparams[_p(prefix, 'C')],
-                                         tparams[_p(prefix, 'T')],
-                                         tparams[_p(prefix, 'Wz')],
-                                         tparams[_p(prefix, 'Uz')],
-                                         tparams[_p(prefix, 'Wr')],
-                                         tparams[_p(prefix, 'Ur')],
-                                         tparams[_p(prefix, 'W2')],
-                                         tparams[_p(prefix, 'U2')]],
-                          name=_p(prefix, '_layers'),
-                          n_steps=nsteps,
-                          strict=True)
+    # set initial state to all zeros
+    if init_states is None:
+        init_states = [tensor.unbroadcast(tensor.alloc(0., n_samples, dim), 0),
+                       tensor.unbroadcast(tensor.alloc(0., n_samples, dim), 0)]
+
+    if one_step:  # sampling
+        rval = _step(*(seqs+init_states+shared_vars))
+    else:  # training
+        rval, _ = theano.scan(_step,
+                              sequences=seqs,
+                              outputs_info=init_states,
+                              non_sequences=shared_vars,
+                              name=_p(prefix, '_layers'),
+                              n_steps=nsteps,
+                              strict=True)
     return rval
 
 
@@ -309,7 +324,11 @@ class RMN(object):
 
         # x: 1 x 1
         y = tensor.vector('y_sampler', dtype='int64')
-        init_state = tensor.matrix('init_state', dtype='float32')
+        y_prev = tensor.matrix('y_prev', dtype='int64')
+        step = tensor.scalar('step', dtype='int64')
+        init_state_h1 = tensor.matrix('init_state_h1', dtype='float32')
+        init_state_h2 = tensor.matrix('init_state_h2', dtype='float32')
+        init_states = [init_state_h1, init_state_h2]
 
         # if it's the first word, emb should be all zero
         emb = tensor.switch(y[:, None] < 0,
@@ -321,23 +340,25 @@ class RMN(object):
                                                 prefix='encoder',
                                                 mask=None,
                                                 one_step=True,
-                                                init_state=init_state)
-        next_state = proj[0]
+                                                init_states=init_states,
+                                                step=step,
+                                                x=y_prev)
+        next_state = proj[1]
 
         # compute the output probability dist and sample
-        logit_lstm = get_layer('ff')[1](tparams, next_state, options,
+        logit_lstm = get_layer('ff')[1](tparams, next_state,
                                         prefix='ff_logit_lstm', activ='linear')
-        logit_prev = get_layer('ff')[1](tparams, emb, options,
+        logit_prev = get_layer('ff')[1](tparams, emb,
                                         prefix='ff_logit_prev', activ='linear')
         logit = tensor.tanh(logit_lstm+logit_prev)
-        logit = get_layer('ff')[1](tparams, logit, options,
+        logit = get_layer('ff')[1](tparams, logit,
                                    prefix='ff_logit', activ='linear')
         next_probs = tensor.nnet.softmax(logit)
         next_sample = trng.multinomial(pvals=next_probs).argmax(1)
 
         # next word probability
         print 'Building f_next..',
-        inps = [y, init_state]
+        inps = [y, y_prev, step] + init_states
         outs = [next_probs, next_sample, next_state]
         f_next = theano.function(inps, outs, name='f_next')
         print 'Done'
