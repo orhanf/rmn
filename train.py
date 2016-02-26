@@ -209,8 +209,8 @@ def train(dim_word=100,  # word vector dimensionality
                 # FIXME: random selection?
                 for jj in xrange(5):
                     sample, score = rmn_.gen_sample(tparams, f_next,
-                                                    model_options, trng=trng,
-                                                    maxlen=30, argmax=False)
+                                                    trng=trng, maxlen=30,
+                                                    argmax=False)
                     print 'Sample ', jj, ': ',
                     ss = sample
                     for vv in ss:

@@ -62,7 +62,8 @@ def fflayer(tparams, state_below, prefix='rconv',
 
 # GRU-RMN layer
 def param_init_gru_rmn(params, prefix='gru_rmn', nin=None, dim=None,
-                       vocab_dim=None, memory_dim=None, memory_size=None):
+                       vocab_size=None, memory_dim=None, memory_size=None):
+    assert dim == memory_dim, 'Should be fixed!'
 
     # first GRU params
     W = numpy.concatenate([norm_weight(nin, dim),
@@ -76,14 +77,14 @@ def param_init_gru_rmn(params, prefix='gru_rmn', nin=None, dim=None,
     params[_p(prefix, 'bx')] = numpy.zeros((dim,)).astype('float32')
 
     # memory block params
-    params[_p(prefix, 'M')] = norm_weight(vocab_dim, memory_dim)
-    params[_p(prefix, 'C')] = norm_weight(vocab_dim, memory_dim)
+    params[_p(prefix, 'M')] = norm_weight(vocab_size, memory_dim)
+    params[_p(prefix, 'C')] = norm_weight(vocab_size, memory_dim)
     params[_p(prefix, 'T')] = norm_weight(memory_size, memory_dim)
 
     # second GRU params
-    params[_p(prefix, 'Wz')] = norm_weight(dim, memory_dim)
-    params[_p(prefix, 'Wr')] = norm_weight(dim, memory_dim)
-    params[_p(prefix, 'W2')] = norm_weight(dim, memory_dim)
+    params[_p(prefix, 'Wz')] = norm_weight(dim, memory_dim, ortho=False)
+    params[_p(prefix, 'Wr')] = norm_weight(dim, memory_dim, ortho=False)
+    params[_p(prefix, 'W2')] = norm_weight(dim, memory_dim, ortho=False)
     params[_p(prefix, 'Uz')] = ortho_weight(dim)
     params[_p(prefix, 'Ur')] = ortho_weight(dim)
     params[_p(prefix, 'U2')] = ortho_weight(dim)
@@ -105,8 +106,9 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
         n_samples = 1
 
     dim = tparams[_p(prefix, 'Ux')].shape[1]
+    memory_dim = tparams[_p(prefix, 'M')].shape[1]
 
-    steps = tensor.arange(state_below.shape[0])
+    steps = tensor.arange(1, state_below.shape[0]+1)
     if one_step and step is not None:
         steps = step
 
@@ -129,6 +131,8 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
                     U, Ux, M, C, T,
                     Wz, Uz, Wr, Ur, W2, U2):
 
+        batch_size = h1_.shape[0]
+
         # first layer GRU
         preact = tensor.dot(h1_, U)
         preact += x_
@@ -146,23 +150,24 @@ def gru_rmn_layer(tparams, state_below, prefix='gru_rmn', mask=None,
 
         # memory block
         n_back = idx - memory_size
-        n_back = ifelse(tensor.lt(n_back, 0),
-                        tensor.zeros_like(n_back), n_back)
+        n_back = tensor.maximum(n_back, 0)
+        n = tensor.minimum(idx - n_back, memory_size)
         xi = ctx[n_back:idx, :].flatten()
-        Mi = M[xi, :]
-        Ci = C[xi, :]
-        Ti = T[-n_back:, :]  # so called slicing
+        Mi = M[xi, :].reshape([n, batch_size, memory_dim])
+        Ci = C[xi, :].reshape([n, batch_size, memory_dim])
+        Ti = T[:n, :]  # so called slicing
 
-        preact = tensor.dot((Mi + Ti), h1)
-        pt = tensor.nnet.softmax(preact)
-        st = tensor.dot(Ci.T, pt)
+        # attention
+        preact = ((Mi + Ti[:, None, :]) * h1).sum(2)
+        pt = tensor.nnet.softmax(preact.T)
+        st = (Ci * pt.T[:, :, None]).sum(0)
 
         # function g, as another GRU
-        r2 = tensor.nnet.sigmoid(tensor.dot(Wr, st) + tensor.dot(Ur, h1))
-        u2 = tensor.nnet.sigmoid(tensor.dot(Wz, st) + tensor.dot(Uz, h1))
+        r2 = tensor.nnet.sigmoid(tensor.dot(st, Wr) + tensor.dot(h1, Ur))
+        u2 = tensor.nnet.sigmoid(tensor.dot(st, Wz) + tensor.dot(h1, Uz))
 
-        preactx = tensor.dot(U2, (r2 * h1))
-        preactx = preactx + tensor.dot(W2, st)
+        preactx = tensor.dot((r2 * h1), U2)
+        preactx = preactx + tensor.dot(st, W2)
         h2 = tensor.tanh(preactx)
         h2 = u2 * h2 + (1. - u2) * h1
         h2 = m_[:, None] * h2 + (1. - m_)[:, None] * h2_
@@ -221,12 +226,15 @@ class RMN(object):
         # rmn layer
         params = get_layer(options['encoder'])[0](
             params, prefix='encoder', nin=options['dim_word'],
-            dim=options['dim'], vocab_dim=options['vocab_dim'],
+            dim=options['dim'], vocab_size=options['n_words'],
             memory_dim=options['memory_dim'],
             memory_size=options['memory_size'])
 
         # readout
-        params = get_layer('ff')[0](params, prefix='ff_logit_lstm',
+        params = get_layer('ff')[0](params, prefix='ff_logit_lstm_h1',
+                                    nin=options['dim'],
+                                    nout=options['dim_word'], ortho=False)
+        params = get_layer('ff')[0](params, prefix='ff_logit_lstm_h2',
                                     nin=options['dim'],
                                     nout=options['dim_word'], ortho=False)
         params = get_layer('ff')[0](params, prefix='ff_logit_prev',
@@ -270,6 +278,13 @@ class RMN(object):
         x = tensor.matrix('x', dtype='int64')
         x_mask = tensor.matrix('x_mask', dtype='float32')
 
+        """
+        theano.config.compute_test_value = 'warn'
+        floatX = theano.config.floatX
+        x.tag.test_value = numpy.random.randint(20000, 30000, size=(15, 8))
+        x_mask.tag.test_value = numpy.ones_like(x.tag.test_value).astype(floatX)
+        """
+
         n_timesteps = x.shape[0]
         n_samples = x.shape[1]
 
@@ -281,20 +296,24 @@ class RMN(object):
         emb = emb_shifted
         opt_ret['emb'] = emb
 
-        # pass through gru layer, recurrence here
+        # pass through gru-rmn layer, recurrence here
         proj = get_layer(options['encoder'])[1](
             tparams, emb, prefix='encoder', x=x, mask=x_mask,
             memory_size=options['memory_size'])
 
-        proj_h = proj[1]
-        opt_ret['proj_h'] = proj_h
+        proj_h1 = proj[0]
+        proj_h2 = proj[1]
+        opt_ret['proj_h1'] = proj_h1
+        opt_ret['proj_h2'] = proj_h2
 
         # compute word probabilities
-        logit_lstm = get_layer('ff')[1](tparams, proj_h,
-                                        prefix='ff_logit_lstm', activ='linear')
+        logit_lstm_h1 = get_layer('ff')[1](tparams, proj_h1,
+                                           prefix='ff_logit_lstm_h1', activ='linear')
+        logit_lstm_h2 = get_layer('ff')[1](tparams, proj_h2,
+                                           prefix='ff_logit_lstm_h2', activ='linear')
         logit_prev = get_layer('ff')[1](tparams, emb,
                                         prefix='ff_logit_prev', activ='linear')
-        logit = tensor.tanh(logit_lstm+logit_prev)
+        logit = tensor.tanh(logit_lstm_h1 + logit_lstm_h2 + logit_prev)
         logit = get_layer('ff')[1](tparams, logit, prefix='ff_logit',
                                    activ='linear')
         logit_shp = logit.shape
@@ -343,14 +362,17 @@ class RMN(object):
                                                 init_states=init_states,
                                                 step=step,
                                                 x=y_prev)
-        next_state = proj[1]
+        next_state_h1 = proj[0]
+        next_state_h2 = proj[1]
 
         # compute the output probability dist and sample
-        logit_lstm = get_layer('ff')[1](tparams, next_state,
-                                        prefix='ff_logit_lstm', activ='linear')
+        logit_lstm_h1 = get_layer('ff')[1](tparams, next_state_h1,
+                                           prefix='ff_logit_lstm_h1', activ='linear')
+        logit_lstm_h2 = get_layer('ff')[1](tparams, next_state_h2,
+                                           prefix='ff_logit_lstm_h2', activ='linear')
         logit_prev = get_layer('ff')[1](tparams, emb,
                                         prefix='ff_logit_prev', activ='linear')
-        logit = tensor.tanh(logit_lstm+logit_prev)
+        logit = tensor.tanh(logit_lstm_h1 + logit_lstm_h2 + logit_prev)
         logit = get_layer('ff')[1](tparams, logit,
                                    prefix='ff_logit', activ='linear')
         next_probs = tensor.nnet.softmax(logit)
@@ -359,7 +381,7 @@ class RMN(object):
         # next word probability
         print 'Building f_next..',
         inps = [y, y_prev, step] + init_states
-        outs = [next_probs, next_sample, next_state]
+        outs = [next_probs, next_sample, next_state_h1, next_state_h2]
         f_next = theano.function(inps, outs, name='f_next')
         print 'Done'
 
@@ -373,8 +395,6 @@ class RMN(object):
             tparams = self.tparams
         if trng is None:
             trng = RandomStreams(1234)
-        if f_next is None:
-            f_next = self.build_sampler(trng)
         if maxlen is None:
             maxlen = 30
 
@@ -384,17 +404,21 @@ class RMN(object):
 
         # initial token is indicated by a -1 and initial state is zero
         next_w = -1 * numpy.ones((1,)).astype('int64')
-        next_state = numpy.zeros((1, options['dim'])).astype('float32')
+        prev_ws = -1 * numpy.ones((1, 1)).astype('int64')  # TODO: this should be fixed
+        next_state_h1 = numpy.zeros((1, options['dim'])).astype('float32')
+        next_state_h2 = numpy.zeros((1, options['dim'])).astype('float32')
 
         for ii in xrange(maxlen):
-            inps = [next_w, next_state]
+            print ii + 1
+            inps = [next_w, prev_ws, ii + 1, next_state_h1, next_state_h2]
             ret = f_next(*inps)
-            next_p, next_w, next_state = ret[0], ret[1], ret[2]
+            next_p, next_w, next_state_h1, next_state_h2 = ret[0], ret[1], ret[2], ret[3]
 
             if argmax:
                 nw = next_p[0].argmax()
             else:
                 nw = next_w[0]
+            prev_ws = numpy.append(prev_ws, [[nw]], axis=0)
             sample.append(nw)
             sample_score += next_p[0, nw]
             if nw == 0:
