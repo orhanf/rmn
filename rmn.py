@@ -416,7 +416,6 @@ class RMN(object):
         next_state_h2 = numpy.zeros((1, options['dim'])).astype('float32')
 
         for ii in xrange(maxlen):
-            print ii + 1
             inps = [next_w, prev_ws, ii + 1, next_state_h1, next_state_h2]
             ret = f_next(*inps)
             next_p, next_w, next_state_h1, next_state_h2 = ret[0], ret[1], ret[2], ret[3]
