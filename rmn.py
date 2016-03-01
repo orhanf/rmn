@@ -278,12 +278,12 @@ class RMN(object):
         x = tensor.matrix('x', dtype='int64')
         x_mask = tensor.matrix('x_mask', dtype='float32')
 
-        """
+        '''
         theano.config.compute_test_value = 'warn'
         floatX = theano.config.floatX
         x.tag.test_value = numpy.random.randint(20000, 30000, size=(15, 8))
         x_mask.tag.test_value = numpy.ones_like(x.tag.test_value).astype(floatX)
-        """
+        '''
 
         n_timesteps = x.shape[0]
         n_samples = x.shape[1]
@@ -349,19 +349,26 @@ class RMN(object):
         init_state_h2 = tensor.matrix('init_state_h2', dtype='float32')
         init_states = [init_state_h1, init_state_h2]
 
+        '''
+        floatX = theano.config.floatX
+        y.tag.test_value = numpy.random.randint(20000, 30000, size=(1,)).astype('int64')
+        y_prev.tag.test_value = numpy.random.randint(20000, 30000, size=(11, 1)).astype('int64')
+        step.tag.test_value = numpy.int64(11)
+        init_state_h1.tag.test_value = numpy.random.randn(1, 512).astype('float32')
+        init_state_h2.tag.test_value = numpy.random.randn(1, 512).astype('float32')
+        '''
+
         # if it's the first word, emb should be all zero
         emb = tensor.switch(y[:, None] < 0,
                             tensor.alloc(0., 1, tparams['Wemb'].shape[1]),
                             tparams['Wemb'][y])
 
         # apply one step of gru layer
-        proj = get_layer(options['encoder'])[1](tparams, emb,
-                                                prefix='encoder',
-                                                mask=None,
-                                                one_step=True,
-                                                init_states=init_states,
-                                                step=step,
-                                                x=y_prev)
+        proj = get_layer(options['encoder'])[1](
+            tparams, emb, prefix='encoder', mask=None, one_step=True,
+            init_states=init_states, memory_size=options['memory_size'],
+            step=step, x=y_prev)
+
         next_state_h1 = proj[0]
         next_state_h2 = proj[1]
 
