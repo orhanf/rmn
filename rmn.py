@@ -254,6 +254,7 @@ class RMN(object):
             if kk not in pp:
                 warnings.warn('%s is not in the archive' % kk)
                 continue
+            print '... loading [{}] of size {}'.format(kk, pp[kk].shape)
             self.params[kk] = pp[kk]
 
     def init_tparams(self):
@@ -295,6 +296,12 @@ class RMN(object):
         emb_shifted = tensor.set_subtensor(emb_shifted[1:], emb[:-1])
         emb = emb_shifted
         opt_ret['emb'] = emb
+
+        # shift input for rmn
+        # TODO: we have to use a BOS token
+        # now it is shared with EOS token which is problematic
+        x_shifted = tensor.zeros_like(x)
+        x_shifted = tensor.set_subtensor(x_shifted[1:], x[:-1])
 
         # pass through gru-rmn layer, recurrence here
         proj = get_layer(options['encoder'])[1](
@@ -411,7 +418,10 @@ class RMN(object):
 
         # initial token is indicated by a -1 and initial state is zero
         next_w = -1 * numpy.ones((1,)).astype('int64')
-        prev_ws = -1 * numpy.ones((1, 1)).astype('int64')  # TODO: this should be fixed
+
+        # TODO: fix this, we should have a different index for BOS,
+        # now it is using BOS in the memory vocabulary
+        prev_ws = 0 * numpy.ones((1, 1)).astype('int64')  # TODO: this should be fixed
         next_state_h1 = numpy.zeros((1, options['dim'])).astype('float32')
         next_state_h2 = numpy.zeros((1, options['dim'])).astype('float32')
 

@@ -140,11 +140,15 @@ def train(dim_word=100,  # word vector dimensionality
     print 'Optimization'
 
     history_errs = []
+    uidx = 0
+    estop = False
+    bad_counter = 0
+
     # reload history
     if reload_ and os.path.exists(saveto):
         history_errs = list(numpy.load(saveto)['history_errs'])
+        uidx = numpy.load(saveto)['uidx']
     best_p = None
-    bad_count = 0
 
     if validFreq == -1:
         validFreq = len(train[0])/batch_size
@@ -154,9 +158,6 @@ def train(dim_word=100,  # word vector dimensionality
         sampleFreq = len(train[0])/batch_size
 
     # Training loop
-    uidx = 0
-    estop = False
-    bad_counter = 0
     for eidx in xrange(max_epochs):
         n_samples = 0
 
@@ -200,7 +201,8 @@ def train(dim_word=100,  # word vector dimensionality
                     params = best_p
                 else:
                     params = unzip(tparams)
-                numpy.savez(saveto, history_errs=history_errs, **params)
+                numpy.savez(saveto, history_errs=history_errs, uidx=uidx,
+                            **params)
                 pkl.dump(model_options, open('%s.pkl' % saveto, 'wb'))
                 print 'Done'
 
@@ -225,8 +227,7 @@ def train(dim_word=100,  # word vector dimensionality
             # validate model on validation set and early stop if necessary
             if numpy.mod(uidx, validFreq) == 0:
                 use_noise.set_value(0.)
-                valid_errs = rmn_.pred_probs(f_log_probs, prepare_data,
-                                             model_options, valid)
+                valid_errs = rmn_.pred_probs(valid, f_log_probs, prepare_data)
                 valid_err = valid_errs.mean()
                 history_errs.append(valid_err)
 
@@ -269,6 +270,7 @@ def train(dim_word=100,  # word vector dimensionality
     params = copy.copy(best_p)
     numpy.savez(saveto, zipped_params=best_p,
                 history_errs=history_errs,
+                uidx=uidx,
                 **params)
 
     return valid_err
