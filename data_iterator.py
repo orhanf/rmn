@@ -11,7 +11,7 @@ def fopen(filename, mode='r'):
 
 
 # batch preparation, returns padded batch and mask
-def prepare_data(seqs_x, maxlen=None, n_words=30000):
+def prepare_data(seqs_x, maxlen=None, n_words=30000, bos=-1):
     # x: a list of sentences
     lengths_x = [len(s) for s in seqs_x]
 
@@ -20,7 +20,7 @@ def prepare_data(seqs_x, maxlen=None, n_words=30000):
         new_seqs_x = []
         new_lengths_x = []
         for l_x, s_x in zip(lengths_x, seqs_x):
-            if l_x < maxlen:
+            if l_x <= maxlen:
                 new_seqs_x.append(s_x)
                 new_lengths_x.append(l_x)
         lengths_x = new_lengths_x
@@ -30,14 +30,16 @@ def prepare_data(seqs_x, maxlen=None, n_words=30000):
             return None, None, None, None
 
     n_samples = len(seqs_x)
-    maxlen_x = numpy.max(lengths_x) + 1
+    final_maxlen = numpy.max(lengths_x) + 2
 
-    x = numpy.zeros((maxlen_x, n_samples)).astype('int64')
-    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
+    x = numpy.zeros((final_maxlen, n_samples)).astype('int64')
+    x_mask = numpy.zeros((final_maxlen, n_samples)).astype('float32')
     for idx, s_x in enumerate(seqs_x):
-        x[:lengths_x[idx], idx] = s_x
-        x_mask[:lengths_x[idx]+1, idx] = 1.
+        x[1:lengths_x[idx]+1, idx] = s_x
+        x_mask[1:lengths_x[idx]+1, idx] = 1.
 
+    # set the bos token
+    x[0] = bos
     return x, x_mask
 
 
@@ -109,8 +111,12 @@ class TextIterator:
                     break
                 ss = [self.source_dict[w] if w in self.source_dict else 1
                       for w in ss]
+                # if index is larger than the vocabulary size,
+                # additional -1 is for BOS token, we will be using
+                # the last index for BOS token, Wemb[-1] -> BOS
                 if self.n_words_source > 0:
-                    ss = [w if w < self.n_words_source else 1 for w in ss]
+                    ss = [w if w < (self.n_words_source - 1) else 1
+                          for w in ss]
 
                 if len(ss) > self.maxlen:
                     continue

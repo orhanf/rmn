@@ -5,7 +5,6 @@ import theano
 import warnings
 
 from collections import OrderedDict
-from theano.ifelse import ifelse
 from theano import tensor
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
@@ -305,7 +304,7 @@ class RMN(object):
 
         # pass through gru-rmn layer, recurrence here
         proj = get_layer(options['encoder'])[1](
-            tparams, emb, prefix='encoder', x=x, mask=x_mask,
+            tparams, emb, prefix='encoder', x=x_shifted, mask=x_mask,
             memory_size=options['memory_size'])
 
         proj_h1 = proj[0]
@@ -315,9 +314,11 @@ class RMN(object):
 
         # compute word probabilities
         logit_lstm_h1 = get_layer('ff')[1](tparams, proj_h1,
-                                           prefix='ff_logit_lstm_h1', activ='linear')
+                                           prefix='ff_logit_lstm_h1',
+                                           activ='linear')
         logit_lstm_h2 = get_layer('ff')[1](tparams, proj_h2,
-                                           prefix='ff_logit_lstm_h2', activ='linear')
+                                           prefix='ff_logit_lstm_h2',
+                                           activ='linear')
         logit_prev = get_layer('ff')[1](tparams, emb,
                                         prefix='ff_logit_prev', activ='linear')
         logit = tensor.tanh(logit_lstm_h1 + logit_lstm_h2 + logit_prev)
